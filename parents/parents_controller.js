@@ -49,20 +49,77 @@ const getChildren = async (req, res) => {
 
 const getForms = async (req, res) => {
     try {
-        const { studentId } = req.params;
-        const parent = req.parent;
+        const studentId = req.params.studentId;
+        const parentId = req.parent._id;
 
+        // Find the student
         const student = await Student.findById(studentId);
-        if (!student || !parent.children.includes(studentId)) {
-            return res.status(404).send({ error: 'Student not found or not your child.' });
+        if (!student) {
+            return res.status(404).json({
+                success: false,
+                message: 'Student not found'
+            });
         }
 
-        const forms = await DynamicForm.find({ _id: { $in: student.forms } });
+        // Validate parent's access
+        const parent = await Parent.findById(parentId);
+        if (!parent.children.includes(studentId)) {
+            return res.status(403).json({
+                success: false,
+                message: 'Not authorized to view this student\'s forms'
+            });
+        }
 
-        res.status(200).send(forms);
+        // Find forms with specific fields
+        const forms = await DynamicForm.find({
+            $or: [
+                {
+                    assignedTo: 'specific',
+                    studentIds: studentId
+                },
+                {
+                    assignedTo: 'class',
+                    'class.standard': student.class,
+                    'class.division': student.division
+                }
+            ]
+        })
+        .select('title description fields createdAt responses')
+        .lean();
+
+        if (!forms || forms.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'No forms found for this student'
+            });
+        }
+
+        // Format the response and check response status
+        const formattedForms = forms.map(form => ({
+            _id: form._id,
+            title: form.title,
+            description: form.description,
+            fields: form.fields,
+            createdAt: form.createdAt,
+            isResponded: form.responses?.some(response => 
+                response.parentId?.toString() === parentId.toString() && 
+                response.studentId?.toString() === studentId
+            ) || false
+        }));
+
+        // Send single response
+        return res.status(200).json({
+            success: true,
+            forms: formattedForms
+        });
+
     } catch (error) {
-        console.error('Error getting forms:', error);
-        res.status(500).send({ error: 'Error getting forms.' });
+        console.error('Error fetching forms:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Error fetching forms',
+            error: error.message
+        });
     }
 };
 
@@ -352,7 +409,77 @@ const getChatHistory = async (req, res) => {
     }
 };
 
+const getAllFormsNotFilled = async (req, res) => {
+    try {
+        const parentId = req.parent._id;
+        const parent = await Parent.findById(parentId).populate('children');
 
+        if (!parent) {
+            return res.status(404).json({ 
+                success: false, 
+                message: 'Parent not found' 
+            });
+        }
+
+        // Get all forms assigned to the parent's children
+        const forms = await DynamicForm.find({
+            $or: [
+                {
+                    assignedTo: 'class',
+                    'class.standard': { 
+                        $in: parent.children.map(child => child.class) 
+                    },
+                    'class.division': { 
+                        $in: parent.children.map(child => child.division) 
+                    }
+                },
+                {
+                    assignedTo: 'specific',
+                    studentIds: { 
+                        $in: parent.children.map(child => child._id) 
+                    }
+                }
+            ],
+            // Check if form hasn't been filled by this parent
+            'responses.parentId': { 
+                $ne: parentId 
+            }
+        }).populate('studentIds', 'fullName class division');
+
+        res.status(200).json({ 
+            success: true, 
+            forms: forms.map(form => ({
+                _id: form._id,
+                title: form.title,
+                description: form.description,
+                assignedTo: form.assignedTo,
+                class: form.class,
+                fields: form.fields,
+                createdAt: form.createdAt,
+                students: form.studentIds
+            }))
+        });
+    } catch (error) {
+        console.error('Error fetching forms not filled:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Error fetching forms not filled', 
+            error: error.message 
+        });
+    }
+};
+
+const getNotes = async (req, res) => {
+    try {
+        const parent = req.parent;
+        const notes = await Note.find({ receiverId: { $in: parent.children } }).populate('senderId', 'fullName');
+
+        res.status(200).json({ success: true, notes });
+    } catch (error) {
+        console.error('Error fetching notes:', error);
+        res.status(500).json({ success: false, message: 'Error fetching notes', error: error.message });
+    }
+};
 const createDonation = async (req, res) => {
     try {
         const donorId = req.parent._id;
@@ -447,4 +574,5 @@ const applyForDonation = async (req, res) => {
 };
 export { login,getChildren,fillForm, getForms, getMarksheet, getAttendanceReport, sendNoteToTeacher, acknowledgeNote, getTeacherDetails,sendMessageToTeacher, getChatHistory ,    createDonation,
     getPendingDonations,
-    applyForDonation};
+    applyForDonation,getAllFormsNotFilled,
+    getNotes};

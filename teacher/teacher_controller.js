@@ -80,6 +80,17 @@ const assignMarksheet = async (req, res) => {
     }
 };
 
+const getNotes = async (req, res) => {
+    try {
+        const teacherId = req.teacher._id;
+        const notes = await Note.find({ receiverId: teacherId }).populate('senderId', 'fullName');
+
+        res.status(200).json({ success: true, notes });
+    } catch (error) {
+        console.error('Error fetching notes:', error);
+        res.status(500).json({ success: false, message: 'Error fetching notes', error: error.message });
+    }
+};
 const assignAttendance = async (req, res) => {
     try {
         const { studentId, month, presentDates } = req.body;
@@ -133,22 +144,6 @@ const getMarksheet = async (req, res) => {
     }
 };
 
-const getForm = async (req, res) => {
-    try {
-        const { studentId } = req.params;
-        const teacher = req.teacher;
-
-        const student = await Student.findById(studentId);
-        if (!student) {
-            return res.status(404).send({ error: 'Student not found.' });
-        }
-
-        res.status(200).send(student);
-    } catch (error) {
-        console.error('Error getting form:', error);
-        res.status(500).send({ error: 'Error getting form.' });
-    }
-};
 
 const giveNote = async (req, res) => {
     try {
@@ -228,7 +223,8 @@ const giveForm = async (req, res) => {
                     division: classInfo.division
                 },
                 studentIds: classStudents.map(student => student._id),
-                fields
+                fields,
+                createdBy: teacher._id
             });
 
             await form.save();
@@ -266,7 +262,146 @@ const giveForm = async (req, res) => {
         res.status(500).send({ error: 'Error giving form.' });
     }
 };
+const getSentForms = async (req, res) => {
+    try {
+        const teacherId = req.teacher._id;
 
+        // Get all forms created by this teacher
+        const forms = await DynamicForm.find({
+            createdBy: teacherId
+        })
+        .select('title description assignedTo class studentIds fields responses createdAt')
+        .populate('studentIds', 'fullName class division')
+        .lean();
+
+        if (!forms || forms.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'No forms found'
+            });
+        }
+
+        // Format response data
+        const formattedForms = forms.map(form => ({
+            _id: form._id,
+            title: form.title,
+            description: form.description,
+            assignedTo: form.assignedTo,
+            class: form.assignedTo === 'class' ? form.class : null
+
+        }));
+
+        return res.status(200).json({
+            success: true,
+            forms: formattedForms
+        });
+
+    } catch (error) {
+        console.error('Error fetching sent forms:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Error fetching sent forms',
+            error: error.message
+        });
+    }
+};
+const getFormAnalytics = async (req, res) => {
+    try {
+        const { formId } = req.params;
+        const teacherId = req.teacher._id;
+
+        const form = await DynamicForm.findOne({
+            _id: formId,
+            createdBy: teacherId
+        })
+        .populate('responses.parentId', 'fullName')
+        .populate('responses.studentId', 'fullName class division')
+        .lean();
+
+        if (!form) {
+            return res.status(404).json({
+                success: false,
+                message: 'Form not found'
+            });
+        }
+
+        // Calculate statistics for each field
+        const fieldStats = form.fields.map(field => {
+            let stats = {
+                label: field.label,
+                type: field.type,
+                totalResponses: form.responses.length
+            };
+
+            if (field.type === 'select' || field.type === 'radio' || field.type === 'checkbox') {
+                const optionCounts = {};
+                field.options.forEach(option => {
+                    optionCounts[option] = 0;
+                });
+
+                form.responses.forEach(response => {
+                    const answer = response.answers.find(a => a.field === field.label);
+                    if (answer) {
+                        optionCounts[answer.value] = (optionCounts[answer.value] || 0) + 1;
+                    }
+                });
+
+                stats.optionStats = Object.entries(optionCounts).map(([option, count]) => ({
+                    option,
+                    count,
+                    percentage: ((count / form.responses.length) * 100).toFixed(1)
+                }));
+            }
+
+            if (field.type === 'text' || field.type === 'email') {
+                stats.responses = form.responses.map(response => {
+                    const answer = response.answers.find(a => a.field === field.label);
+                    return {
+                        response: answer ? answer.value : '',
+                        parent: response.parentId.fullName,
+                        student: response.studentId.fullName,
+                        class: `${response.studentId.class}-${response.studentId.division}`
+                    };
+                });
+            }
+
+            return stats;
+        });
+
+        // Overall statistics
+        const overallStats = {
+            totalAssigned: form.assignedTo === 'class' ? 
+                await Student.countDocuments({
+                    class: form.class.standard,
+                    division: form.class.division
+                }) : 
+                form.studentIds.length,
+            responseCount: form.responses.length,
+            responseRate: 0,
+            lastResponse: form.responses.length > 0 ? 
+                new Date(Math.max(...form.responses.map(r => r.createdAt))) : null
+        };
+
+        overallStats.responseRate = ((overallStats.responseCount / overallStats.totalAssigned) * 100).toFixed(1);
+
+        return res.status(200).json({
+            success: true,
+            formTitle: form.title,
+            formDescription: form.description,
+            createdAt: form.createdAt,
+            overallStats,
+            fieldStats
+        });
+
+    } catch (error) {
+        console.error('Error getting form analytics:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Error getting form analytics',
+            error: error.message
+        });
+    }
+};
 const getFormResponses = async (req, res) => {
     try {
         const { formId } = req.params;
@@ -396,7 +531,7 @@ export {
     assignMarksheet, 
     assignAttendance, 
     getMarksheet, 
-    getForm, 
+    getFormAnalytics,
     giveNote, 
     acknowledgeNote, 
     giveForm, 
@@ -404,6 +539,7 @@ export {
     getAttendanceReport,
     getClassStudents,
     sendMessageToParent,
-    getChatHistory
+    getChatHistory,
+    getNotes,getSentForms
 };
 

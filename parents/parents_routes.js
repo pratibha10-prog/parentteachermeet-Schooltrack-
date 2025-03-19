@@ -2,7 +2,8 @@ import express from 'express';
 import { parentAuthMiddleware } from './parents_middleware.js';
 import { login,getChildren, getForms, getMarksheet, getAttendanceReport, sendNoteToTeacher, acknowledgeNote, getTeacherDetails,fillForm ,getChatHistory,sendMessageToTeacher,    createDonation,
     getPendingDonations,
-    applyForDonation} from './parents_controller.js';
+    applyForDonation,getAllFormsNotFilled,
+    getNotes} from './parents_controller.js';
 
 const router = express.Router();
 
@@ -17,6 +18,8 @@ router.get('/teacher-details/:studentId', parentAuthMiddleware, getTeacherDetail
 router.post('/fill-form', parentAuthMiddleware, fillForm);
 router.post('/chat/send', parentAuthMiddleware, sendMessageToTeacher);
 router.get('/chat/history', parentAuthMiddleware, getChatHistory);
+router.get('/forms/not-filled', parentAuthMiddleware, getAllFormsNotFilled);
+router.get('/notes', parentAuthMiddleware, getNotes);
 
 router.post('/donations/create', parentAuthMiddleware, createDonation);
 router.get('/donations/pending', parentAuthMiddleware, getPendingDonations);
