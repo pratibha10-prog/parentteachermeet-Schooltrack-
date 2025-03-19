@@ -10,24 +10,26 @@ const generateToken = (id) => {
 
 const registerAdmin = async (req, res) => {
     try {
-        const { email, password } = req.body;
+        const { email, password, adminKey } = req.body;
 
-        
+
+        if (adminKey !== process.env.ADMIN_KEY) {
+            return res.status(403).json({ error: 'Invalid admin key' });
+        }
+
         const existingAdmin = await Admin.findOne({ email });
         if (existingAdmin) return res.status(400).json({ error: 'Admin already exists' });
 
-    
         const hashedPassword = await bcrypt.hash(password, 10);
-        const admin = new Admin({ ...req.body, password: hashedPassword });
+        const admin = new Admin({ email, password: hashedPassword });
 
         await admin.save();
-        
-        res.status(201).json({ admin});
+
+        res.status(201).json({ message: 'Admin registered successfully' });
     } catch (error) {
         res.status(500).json({ error: 'Error registering admin' });
     }
 };
-
 
 const loginAdmin = async (req, res) => {
     try {
