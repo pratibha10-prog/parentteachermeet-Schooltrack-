@@ -1,4 +1,4 @@
-import { Student, MarkSheet, Attendance, Note, DynamicForm, Teacher,Chat } from '../model.js';
+import { Student, MarkSheet, Attendance, Note, DynamicForm, Teacher,Chat,SchoolWorkingDay } from '../model.js';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 
@@ -91,36 +91,157 @@ const getNotes = async (req, res) => {
         res.status(500).json({ success: false, message: 'Error fetching notes', error: error.message });
     }
 };
-const assignAttendance = async (req, res) => {
+
+// 1. Set Working Days for a Month (School side)
+const setWorkingDays = async (req, res) => {
     try {
-        const { studentId, month, presentDates } = req.body;
         const teacher = req.teacher;
-
-        const student = await Student.findById(studentId);
-        if (!student) {
-            return res.status(404).send({ error: 'Student not found.' });
+        if (!teacher || !teacher.classTeacher) {
+            return res.status(403).send({ error: "You are not authorized to set working days." });
         }
+        const { month, workingDays } = req.body;
+        if (!month || !workingDays || !Array.isArray(workingDays)) {
+            return res.status(400).send({ error: "Month and workingDays array are required." });
+        }
+        // Convert workingDays strings into Date objects
+        const workingDaysDates = workingDays.map(day => new Date(day));
 
-        let attendance = await Attendance.findOne({ studentId });
-        if (!attendance) {
-            attendance = new Attendance({ studentId, attendance: [{ month, presentDates }] });
+        // Find the working days record for the teacher's assigned class and division
+        let schoolDoc = await SchoolWorkingDay.findOne({
+            class: teacher.classTeacher.class,
+            division: teacher.classTeacher.division
+        });
+
+        if (!schoolDoc) {
+            // Create a new document if not exists
+            schoolDoc = new SchoolWorkingDay({
+                class: teacher.classTeacher.class,
+                division: teacher.classTeacher.division,
+                attendance: [{
+                    month,
+                    workingDays: workingDaysDates
+                }]
+            });
         } else {
-            const monthIndex = attendance.attendance.findIndex(att => att.month === month);
-            if (monthIndex > -1) {
-                attendance.attendance[monthIndex].presentDates = presentDates;
+            // Check if a month record already exists
+            let monthRecord = schoolDoc.attendance.find(item => item.month === month);
+            if (!monthRecord) {
+                schoolDoc.attendance.push({ month, workingDays: workingDaysDates });
             } else {
-                attendance.attendance.push({ month, presentDates });
+                monthRecord.workingDays = workingDaysDates;
             }
         }
 
-        await attendance.save();
-
-        res.status(201).send("attendance assigned");
+        await schoolDoc.save();
+        res.status(200).send({ message: "Working days set successfully." });
     } catch (error) {
-        console.error('Error assigning attendance:', error);
-        res.status(500).send({ error: 'Error assigning attendance.' });
+        console.error("Error setting working days: ", error);
+        res.status(500).send({ error: "Error setting working days.", details: error.message });
     }
 };
+
+const assignAttendance = async (req, res) => {
+    try {
+        const teacher = req.teacher;
+        if (!teacher || !teacher.classTeacher) {
+            return res.status(403).send({ error: "You are not authorized to assign attendance." });
+        }
+
+        const { month, attendanceRecords } = req.body;
+        if (!month || !attendanceRecords || !Array.isArray(attendanceRecords)) {
+            return res.status(400).send({ error: "Month and attendanceRecords array are required." });
+        }
+
+        // Find working days for teacher's assigned class and division
+        const schoolDoc = await SchoolWorkingDay.findOne({
+            class: teacher.classTeacher.class,
+            division: teacher.classTeacher.division
+        });
+        if (!schoolDoc) {
+            return res.status(400).send({ error: "School working days are not set for your class." });
+        }
+        const monthWorkingRecord = schoolDoc.attendance.find(item => item.month === month);
+        if (!monthWorkingRecord || !monthWorkingRecord.workingDays || monthWorkingRecord.workingDays.length === 0) {
+            return res.status(400).send({ error: `Working days not set for ${month}.` });
+        }
+       
+        const workingDays = monthWorkingRecord.workingDays.map(day => new Date(day));
+
+        // Process each attendance record provided
+        for (const record of attendanceRecords) {
+            const { studentId, presentDates } = record;
+            if (!studentId || !presentDates || !Array.isArray(presentDates)) {
+                continue; 
+            }
+            
+            // Check if the student belongs to teacher’s class and division
+            const student = await Student.findById(studentId);
+            if (!student) {
+                continue;
+            }
+            if (student.class !== teacher.classTeacher.class || student.division !== teacher.classTeacher.division) {
+                // Skip students not in teacher's assigned class/division
+                continue;
+            }
+
+            const convertedPresentDates = presentDates.map(dateStr => new Date(dateStr));
+            const presentSet = new Set(convertedPresentDates.map(d => d.toDateString()));
+            const absentDates = workingDays.filter(day => !presentSet.has(day.toDateString()));
+            const presentPercent = (presentDates.length / workingDays.length) * 100;
+
+            let attendanceDoc = await Attendance.findOne({ studentId });
+            if (!attendanceDoc) {
+                attendanceDoc = new Attendance({ studentId, attendance: [] });
+            }
+
+            let monthRecordInAttendance = attendanceDoc.attendance.find(item => item.month === month);
+            if (!monthRecordInAttendance) {
+                attendanceDoc.attendance.push({
+                    month,
+                    presentDates: convertedPresentDates,
+                    absentDates,
+                    presentpercent: presentPercent
+                });
+            } else {
+                monthRecordInAttendance.presentDates = convertedPresentDates;
+                monthRecordInAttendance.absentDates = absentDates;
+                monthRecordInAttendance.absentpercent = absentPercent;
+            }
+
+            await attendanceDoc.save();
+        }
+        res.status(200).send({ message: "Attendance sheet assigned successfully." });
+    } catch (error) {
+        console.error("Error assigning attendance sheet:", error);
+        res.status(500).send({ error: "Error assigning attendance sheet.", details: error.message });
+    }
+};
+// 3. Get Attendance Sheet for a Student for a Given Month
+// Query parameters: studentId and month (e.g., /api/teacher/getAttendanceSheet?studentId=xxx&month=March%202025)
+const getAttendance = async (req, res) => {
+    try {
+        const { studentId, month } = req.body;
+        if (!studentId || !month) {
+            return res.status(400).send({ error: "studentId and month are required." });
+        }
+
+        const attendanceDoc = await Attendance.findOne({ studentId });
+        if (!attendanceDoc) {
+            return res.status(404).send({ error: "No attendance record found for this student." });
+        }
+
+        const monthRecord = attendanceDoc.attendance.find(item => item.month === month);
+        if (!monthRecord) {
+            return res.status(404).send({ error: `Attendance record for ${month} not found.` });
+        }
+
+        res.status(200).send(monthRecord);
+    } catch (error) {
+        console.error("Error getting attendance sheet:", error);
+        res.status(500).send({ error: "Error getting attendance sheet.", details: error.message });
+    }
+};
+
 
 const getMarksheet = async (req, res) => {
     try {
@@ -529,7 +650,9 @@ const getChatHistory = async (req, res) => {
 export { 
     login, 
     assignMarksheet, 
+    setWorkingDays,
     assignAttendance, 
+    getAttendance,
     getMarksheet, 
     getFormAnalytics,
     giveNote, 

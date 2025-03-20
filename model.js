@@ -80,10 +80,21 @@ const AttendanceSchema = new mongoose.Schema({
   studentId: { type: mongoose.Schema.Types.ObjectId, ref: "Student", required: true },
   attendance: [{
     month: { type: String, required: true }, // e.g., "March 2025"
-    presentDates: [{ type: Date }]
+    presentDates: [{ type: Date }],
+    absentDates: [{ type: Date }],
+    presentpercent:{type:Number}
   }]
 });
 
+
+const SchoolWorkingDaySchema = new mongoose.Schema({
+  class: { type: Number, required: true },
+  division: { type: String, required: true },
+  attendance: [{
+      month: { type: String, required: true }, // e.g., "March 2025"
+      workingDays: [{ type: Date }]
+  }]
+});
 
 const DonationSchema = new mongoose.Schema({
   donorId: { 
@@ -202,19 +213,6 @@ const ChatSchema = new mongoose.Schema({
   timestamps: true 
 });
 
-
-
-const Parent = mongoose.model("Parent", ParentSchema);
-const Student = mongoose.model("Student", StudentSchema);
-const Teacher = mongoose.model("Teacher", TeacherSchema);
-const Admin = mongoose.model("Admin", AdminSchema);
-const MarkSheet = mongoose.model("MarkSheet", MarkSheetSchema);
-const BehaviorReport = mongoose.model("BehaviorReport", BehaviorReportSchema);
-const Attendance = mongoose.model("Attendance", AttendanceSchema);
-const Donation = mongoose.model("Donation", DonationSchema);
-const DynamicForm = mongoose.model("DynamicForm", DynamicFormSchema);
-const Chat = mongoose.model("Chat", ChatSchema);
-
 const NoteSchema = new mongoose.Schema({
   senderId: { 
       type: mongoose.Schema.Types.ObjectId, 
@@ -249,7 +247,21 @@ const NoteSchema = new mongoose.Schema({
   }
 });
 
+
+const Parent = mongoose.model("Parent", ParentSchema);
+const Student = mongoose.model("Student", StudentSchema);
+const Teacher = mongoose.model("Teacher", TeacherSchema);
+const Admin = mongoose.model("Admin", AdminSchema);
+const MarkSheet = mongoose.model("MarkSheet", MarkSheetSchema);
+const BehaviorReport = mongoose.model("BehaviorReport", BehaviorReportSchema);
+const Attendance = mongoose.model("Attendance", AttendanceSchema);
+const Donation = mongoose.model("Donation", DonationSchema);
+const DynamicForm = mongoose.model("DynamicForm", DynamicFormSchema);
+const Chat = mongoose.model("Chat", ChatSchema);
+const SchoolWorkingDay=mongoose.model("SchoolWorkingDay",SchoolWorkingDaySchema);
 const Note = mongoose.model('Note', NoteSchema)
+
+
 
 export {
   Parent,
@@ -261,5 +273,6 @@ export {
   Attendance,
   Donation,
   DynamicForm,
-  Chat,Note
+  Chat,
+  SchoolWorkingDay,Note
 };
