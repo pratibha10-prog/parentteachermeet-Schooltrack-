@@ -2,7 +2,9 @@ import express from 'express';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import nodemailer from 'nodemailer';
-import { Admin, Parent, Teacher } from './model.js';
+import { Admin, Parent, Teacher ,OTP} from './model.js';
+import dotenv from 'dotenv';
+dotenv.config();
 
 const router = express.Router();
 
@@ -96,26 +98,8 @@ const changePassword = async (req, res) => {
     }
 };
 
-const generateRandomPassword = () => {
-    const length = 12; // Changed to 12 digits
-    const charset = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    let password = '';
 
-    // Ensure at least one uppercase, one lowercase, and one number
-    password += charset.charAt(Math.floor(Math.random() * 26) + 26); // Uppercase
-    password += charset.charAt(Math.floor(Math.random() * 26)); // Lowercase
-    password += charset.charAt(Math.floor(Math.random() * 10) + 52); // Number
-
-    // Fill the rest randomly
-    for (let i = password.length; i < length; i++) {
-        password += charset.charAt(Math.floor(Math.random() * charset.length));
-    }
-
-    // Shuffle the password
-    return password.split('').sort(() => Math.random() - 0.5).join('');
-};
-
-const forgotPassword = async (req, res) => {
+const generateOTP= async (req, res) => {
     try {
         const { email } = req.body;
 
@@ -155,9 +139,12 @@ const forgotPassword = async (req, res) => {
             });
         }
 
-        const newPassword = generateRandomPassword();
-        user.password = await bcrypt.hash(newPassword, 10);
-        await user.save();
+        const otp = Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit OTP
+    
+        const otpExpiration = Date.now() + 2 * 60 * 1000; // 2 minutes from now
+
+        // Save OTP and expiration time in the database
+        await OTP.create({ email, otp, expiresAt: otpExpiration });
 
         // Configure email transporter
         const transporter = nodemailer.createTransport({
@@ -172,20 +159,104 @@ const forgotPassword = async (req, res) => {
         await transporter.sendMail({
             from: process.env.EMAIL_USER,
             to: email,
-            subject: 'Password Reset',
-            text: `Your new password is: ${newPassword}\n\nPlease change this password after logging in.`,
+            subject: 'Password Reset OTP',
+            text: `Your OTP for password reset is: ${otp}\n\nThis OTP is valid for 2 minutes.`,
             html: `
-                <h2>Password Reset</h2>
-                <p>Your new password is: <strong>${newPassword}</strong></p>
-                <p>Please change this password after logging in.</p>
+                <h2>Password Reset OTP</h2>
+                <p>Your OTP for password reset is: <strong>${otp}</strong></p>
+                <p>This OTP is valid for 2 minutes.</p>
                 <p>If you didn't request this password reset, please contact support immediately.</p>
             `
         });
 
         res.json({ 
             success: true,
-            message: 'New password has been sent to your email',
+            message: 'OTP has been sent to your email',
             userType
+        });
+    } catch (error) {
+        console.error('Error sending OTP:', error);
+        res.status(500).json({ 
+            success: false,
+            message: 'Failed to send OTP',
+            error: error.message 
+        });
+    }
+};
+const resetPassword = async (req, res) => {
+    try {
+        const { email, otp, newPassword } = req.body;
+
+        if (!email || !otp || !newPassword) {
+            return res.status(400).json({ 
+                success: false,
+                message: 'Email, OTP, and new password are required' 
+            });
+        }
+
+        if (newPassword.length < 6) {
+            return res.status(400).json({ 
+                success: false,
+                message: 'New password must be at least 6 characters' 
+            });
+        }
+
+        // Find the OTP record
+        const otpRecord = await OTP.findOne({ email, otp });
+        if (!otpRecord) {
+            return res.status(400).json({ 
+                success: false,
+                message: 'Invalid OTP' 
+            });
+        }
+
+        // Check if OTP is expired
+        if (Date.now() > otpRecord.expiresAt) {
+            return res.status(400).json({ 
+                success: false,
+                message: 'OTP has expired' 
+            });
+        }
+
+        // Search for user in all collections simultaneously
+        const [admin, parent, teacher] = await Promise.all([
+            Admin.findOne({ email }),
+            Parent.findOne({ email }),
+            Teacher.findOne({ email })
+        ]);
+
+        // Find the user and their type
+        let user = null;
+        let userType = '';
+
+        if (admin) {
+            user = admin;
+            userType = 'Admin';
+        } else if (parent) {
+            user = parent;
+            userType = 'Parent';
+        } else if (teacher) {
+            user = teacher;
+            userType = 'Teacher';
+        }
+
+        if (!user) {
+            return res.status(404).json({ 
+                success: false,
+                message: 'User not found' 
+            });
+        }
+
+        // Update password
+        user.password = await bcrypt.hash(newPassword, 10);
+        await user.save();
+
+        // Delete the OTP record
+        await OTP.deleteOne({ email, otp });
+
+        res.json({ 
+            success: true,
+            message: `Password updated successfully for ${userType}`,
         });
     } catch (error) {
         console.error('Error resetting password:', error);
@@ -198,6 +269,8 @@ const forgotPassword = async (req, res) => {
 };
 
 router.post('/change-password', authMiddleware, changePassword);
-router.post('/forgot-password', forgotPassword);
+router.post('/send-otp',generateOTP);
+router.post('/reset-password', resetPassword);
+
 
 export default router;

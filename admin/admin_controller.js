@@ -254,7 +254,154 @@ const assignDonation = async (req, res) => {
     }
 };
 
+const updateTeacher = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { password, addSubjects, removeSubjects, classTeacher, ...rest } = req.body;
 
+        if (password) {
+            const hashedPassword = await bcrypt.hash(password, 10);
+            rest.password = hashedPassword;
+        }
+
+        const teacher = await Teacher.findById(id);
+        if (!teacher) {
+            return res.status(404).json({ error: 'Teacher not found' });
+        }
+
+        // Add subjects to the teacher
+        if (addSubjects && Array.isArray(addSubjects)) {
+            teacher.subjects.push(...addSubjects);
+        }
+
+        // Remove subjects from the teacher
+        if (removeSubjects && Array.isArray(removeSubjects)) {
+            teacher.subjects = teacher.subjects.filter(sub => 
+                !removeSubjects.some(rmSub => 
+                    rmSub.class === sub.class && 
+                    rmSub.division === sub.division && 
+                    rmSub.subject === sub.subject
+                )
+            );
+        }
+
+        // Update classTeacher field if provided
+        if (classTeacher) {
+            teacher.classTeacher = classTeacher;
+        }
+
+        // Update other fields
+        Object.assign(teacher, rest);
+
+        await teacher.save();
+
+        res.status(200).json({ message: 'Teacher updated successfully' });
+    } catch (error) {
+        res.status(500).json({ error: 'Error updating teacher' });
+    }
+};
+const updateParent = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { password, ...rest } = req.body;
+
+        if (password) {
+            const hashedPassword = await bcrypt.hash(password, 10);
+            rest.password = hashedPassword;
+        }
+
+        const updatedParent = await Parent.findByIdAndUpdate(id, rest, { new: true });
+        if (!updatedParent) return res.status(404).json({ error: 'Parent not found' });
+
+        res.status(200).json({ message: 'Parent updated successfully' });
+    } catch (error) {
+        res.status(500).json({ error: 'Error updating parent' });
+    }
+};
+
+const updateStudent = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updatedStudent = await Student.findByIdAndUpdate(id, req.body, { new: true });
+        if (!updatedStudent) return res.status(404).json({ error: 'Student not found' });
+
+        res.status(200).json({ message: 'Student updated successfully' });
+    } catch (error) {
+        res.status(500).json({ error: 'Error updating student' });
+    }
+};
+
+const searchParents = async (req, res) => {
+    try {
+        const { fullName, email, phoneNo } = req.body;
+        const query = {};
+
+        if (fullName) {
+            query.fullName = { $regex: fullName, $options: 'i' };
+        }
+        if (email) {
+            query.email = { $regex: email, $options: 'i' };
+        }
+        if (phoneNo) {
+            query.phoneNo = { $regex: phoneNo, $options: 'i' };
+        }
+
+        const parents = await Parent.find(query).select('-password');
+        res.status(200).json(parents);
+    } catch (error) {
+        console.error('Error searching parents:', error);
+        res.status(500).json({ error: 'Error searching parents' });
+    }
+};
+
+const searchTeachers = async (req, res) => {
+    try {
+        const { fullName, email } = req.body;
+        const query = {};
+
+        if (fullName) {
+            query.fullName = { $regex: fullName, $options: 'i' };
+        }
+        if (email) {
+            query.email = { $regex: email, $options: 'i' };
+        }
+
+        const teachers = await Teacher.find(query).select('-password');
+        res.status(200).json(teachers);
+    } catch (error) {
+        console.error('Error searching teachers:', error);
+        res.status(500).json({ error: 'Error searching teachers' });
+    }
+};
+
+const searchStudents = async (req, res) => {
+    try {
+        const { fullName, roll, dob, class: studentClass, division } = req.body;
+        const query = {};
+
+        if (fullName) {
+            query.fullName = { $regex: fullName, $options: 'i' };
+        }
+        if (roll) {
+            query.roll = roll;
+        }
+        if (dob) {
+            query.dob = new Date(dob);
+        }
+        if (studentClass) {
+            query.class = studentClass;
+        }
+        if (division) {
+            query.division = { $regex: division, $options: 'i' };
+        }
+
+        const students = await Student.find(query).select('-password');
+        res.status(200).json(students);
+    } catch (error) {
+        console.error('Error searching students:', error);
+        res.status(500).json({ error: 'Error searching students' });
+    }
+};
 export {
     registerAdmin,
     loginAdmin,
@@ -266,5 +413,11 @@ export {
     removeStudent,
     getAllDonations,
     getPendingDonations,
-    assignDonation
+    assignDonation,
+    updateParent,
+    updateTeacher,
+    updateStudent,
+    searchParents,
+    searchTeachers,
+    searchStudents
 };

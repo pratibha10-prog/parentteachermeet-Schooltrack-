@@ -9,7 +9,7 @@ import {
     addStudent,
     removeStudent,    getAllDonations,
     getPendingDonations,
-    assignDonation
+    assignDonation,updateParent,updateTeacher,updateStudent,searchParents,searchTeachers,searchStudents
 } from '../admin/admin_controller.js';
 
 import authMiddleware from './admin_middleware.js';
@@ -27,6 +27,12 @@ router.delete('/student/:id', authMiddleware, removeStudent);
 router.get('/donations', authMiddleware, getAllDonations);
 router.get('/donations/pending',authMiddleware, getPendingDonations);
 router.post('/donations/assign',authMiddleware, assignDonation);
+router.put('/parent/:id',authMiddleware,updateParent);
+router.put('/teacher/:id',authMiddleware,updateTeacher);
+router.put('/student/:id',authMiddleware,updateStudent);
+router.post('/search/parents', authMiddleware, searchParents);
+router.post('/search/teachers', authMiddleware, searchTeachers); 
+router.post('/search/students', authMiddleware, searchStudents); 
 
 
 

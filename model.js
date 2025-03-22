@@ -13,7 +13,7 @@ const ParentSchema = new mongoose.Schema({
 // Student Schema
 const StudentSchema = new mongoose.Schema({
   fullName: { type: String, required: true },
-  roll: { type: Number, required: true, unique: true },
+  roll: { type: Number, required: true },
   class: { type: Number, required: true },
   division: { type: String, required: true },
   gender: { type: String, required: true },
@@ -247,6 +247,14 @@ const NoteSchema = new mongoose.Schema({
   }
 });
 
+const OTPSchema = new mongoose.Schema({
+  email: { type: String, required: true },
+  otp: { type: String, required: true },
+  expiresAt: { type: Date, required: true }
+});
+
+const OTP = mongoose.model('OTP', OTPSchema);
+
 
 const Parent = mongoose.model("Parent", ParentSchema);
 const Student = mongoose.model("Student", StudentSchema);
@@ -274,5 +282,5 @@ export {
   Donation,
   DynamicForm,
   Chat,
-  SchoolWorkingDay,Note
+  SchoolWorkingDay,Note,OTP
 };
