@@ -1,6 +1,9 @@
 import express from 'express';
 import { teacherAuthMiddleware, classTeacherAuthMiddleware, subjectTeacherAuthMiddleware } from './teacher_middleware.js';
-import { login, assignMarksheet,  getMarksheet,  giveNote, acknowledgeNote, giveForm, getFormResponses, getAttendanceReport ,getClassStudents,getChatHistory,sendMessageToParent,getNotes,getSentForms,getFormAnalytics,assignAttendance,setWorkingDays,getAttendance} from './teacher_controller.js';
+import { login, assignMarksheet,  getMarksheet,  giveNote, acknowledgeNote, giveForm, getFormResponses, getAttendanceReport ,getClassStudents,getChatHistory,sendMessageToParent,getNotes,getSentForms,getFormAnalytics,assignAttendance,setWorkingDays,getAttendance,setWorkingDaysFromExcel,assignAttendanceFromExcel,assignMarksheetFromExcel} from './teacher_controller.js';
+
+import multer from 'multer';
+const upload = multer({ dest: 'uploads/' });
 
 const router = express.Router();
 
@@ -23,5 +26,7 @@ router.post('/chat/history', teacherAuthMiddleware, subjectTeacherAuthMiddleware
 router.get('/notes', teacherAuthMiddleware, getNotes);
 router.get('/forms/sent', teacherAuthMiddleware, getSentForms);
 router.get('/forms/analytics/:formId', teacherAuthMiddleware, classTeacherAuthMiddleware, getFormAnalytics);
-
+router.post('/set-working-days-excel', teacherAuthMiddleware, classTeacherAuthMiddleware, upload.single('file'), setWorkingDaysFromExcel);
+router.post('/assign-marksheet-excel', teacherAuthMiddleware, classTeacherAuthMiddleware, upload.single('file'), assignMarksheetFromExcel);
+router.post('/assign-marksheet-excel', teacherAuthMiddleware, classTeacherAuthMiddleware, upload.single('file'), assignMarksheetFromExcel);
 export default router;
