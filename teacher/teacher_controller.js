@@ -4,7 +4,8 @@ import jwt from 'jsonwebtoken';
 import multer from 'multer';
 import xlsx from 'xlsx';
 import fs from 'fs';
-const upload = multer({ dest: 'uploads/' });
+import mongoose from 'mongoose';
+const upload = multer({ storage: multer.memoryStorage() });
 
 const login = async (req, res) => {
     try {
@@ -530,16 +531,88 @@ const getFormResponses = async (req, res) => {
 const getClassStudents = async (req, res) => {
     try {
         const teacher = req.teacher;
+        const { class: requestedClass, division: requestedDivision } = req.body;
 
+        // If no class specified, return class teacher's class students with full details
+        if (!requestedClass || !requestedDivision) {
+            if (!teacher.classTeacher) {
+                return res.status(400).json({
+                    success: false,
+                    error: "Please specify class and division or be a class teacher"
+                });
+            }
+
+            const students = await Student.find({
+                class: teacher.classTeacher.class,
+                division: teacher.classTeacher.division
+            }).populate('parentId', 'fullName email phone');
+
+            return res.status(200).json({
+                success: true,
+                count: students.length,
+                isClassTeacher: true,
+                class: teacher.classTeacher.class,
+                division: teacher.classTeacher.division,
+                students
+            });
+        }
+
+        // For specific class/division request
+        const isSubjectTeacher = teacher.subjects.some(subject => 
+            subject.class === parseInt(requestedClass) && 
+            subject.division === requestedDivision
+        );
+
+        const isClassTeacher = teacher.classTeacher &&
+            teacher.classTeacher.class === parseInt(requestedClass) && 
+            teacher.classTeacher.division === requestedDivision;
+
+        if (!isSubjectTeacher && !isClassTeacher) {
+            return res.status(403).json({
+                success: false,
+                error: 'You are not authorized to view students of this class'
+            });
+        }
+
+        // If teacher is class teacher of requested class, return full details
+        if (isClassTeacher) {
+            const students = await Student.find({
+                class: parseInt(requestedClass),
+                division: requestedDivision
+            }).populate('parentId', 'fullName email phone');
+
+            return res.status(200).json({
+                success: true,
+                count: students.length,
+                isClassTeacher: true,
+                class: parseInt(requestedClass),
+                division: requestedDivision,
+                students
+            });
+        }
+
+        // If only subject teacher, return limited details
         const students = await Student.find({
-            class: teacher.classTeacher.class,
-            division: teacher.classTeacher.division
+            class: parseInt(requestedClass),
+            division: requestedDivision
+        }).select('fullName class division rollNo');
+
+        return res.status(200).json({
+            success: true,
+            count: students.length,
+            isClassTeacher: false,
+            class: parseInt(requestedClass),
+            division: requestedDivision,
+            students
         });
 
-        res.status(200).send(students);
     } catch (error) {
         console.error('Error getting class students:', error);
-        res.status(500).send({ error: 'Error getting class students.' });
+        res.status(500).json({
+            success: false,
+            error: 'Error getting class students',
+            details: error.message
+        });
     }
 };
 const sendMessageToParent = async (req, res) => {
@@ -634,170 +707,341 @@ const getChatHistory = async (req, res) => {
         res.status(500).send({ error: 'Error getting chat history.', details: error.message });
     }
 };
+
 const assignMarksheetFromExcel = async (req, res) => {
     try {
-        const file = req.file;
-        const workbook = xlsx.readFile(file.path);
+        if (!req.file) {
+            return res.status(400).json({ error: "No file uploaded." });
+        }
+
+        console.log("File received:", req.file.originalname);
+
+        // Read Excel file
+        const workbook = xlsx.read(req.file.buffer, { type: "buffer" });
         const sheetName = workbook.SheetNames[0];
         const sheet = workbook.Sheets[sheetName];
-        const data = xlsx.utils.sheet_to_json(sheet);
+        const jsonData = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: "" });
 
-        for (const row of data) {
-            const { studentId, examType, overallRemarks, ...subjects } = row;
+        if (jsonData.length < 2) {
+            return res.status(400).json({ error: "Invalid Excel format." });
+        }
+
+        const headers = jsonData[0];
+
+        const results = [];
+        for (let i = 1; i < jsonData.length; i++) {
+            const row = jsonData[i];
+            if (!row[0]) continue; // Skip empty rows
+
+            const studentId = row[0];
+            const examType = row[1];
+
+            // Check if student exists
             const student = await Student.findById(studentId);
             if (!student) {
+                console.log(`Student not found: ${studentId}`);
+                results.push({ studentId, error: "Student not found" });
                 continue;
             }
 
-            const subjectsArray = [];
-            for (let i = 1; subjects[`subject${i}`]; i++) {
-                subjectsArray.push({
-                    subject: subjects[`subject${i}`],
-                    marks: subjects[`marks${i}`],
-                    totalMarks: subjects[`totalMarks${i}`]
+            let subjects = [];
+            let obtainedMarks = 0;
+            let totalMarks = 0;
+
+            // Process subjects dynamically
+            for (let j = 2; j < headers.length; j += 4) {
+                if (!row[j]) break; // Stop if subject is missing
+
+                let subject = row[j];
+                let marks = parseInt(row[j + 1]) || 0;
+                let maxMarks = parseInt(row[j + 2]) || 100;
+                let teacherRemarks = row[j + 3] || "No remark";
+
+                obtainedMarks += marks;
+                totalMarks += maxMarks;
+
+                subjects.push({
+                    subject,
+                    marks,
+                    totalMarks: maxMarks,
+                    teacherRemarks,
                 });
             }
 
-            const obtainedMarks = subjectsArray.reduce((total, subject) => total + subject.marks, 0);
-            const totalPossibleMarks = subjectsArray.reduce((total, subject) => total + subject.totalMarks, 0);
-            const percentage = (obtainedMarks / totalPossibleMarks) * 100;
+            // Calculate percentage
+            const percentage = (obtainedMarks / totalMarks) * 100;
 
+            // Save to database
             const marksheet = new MarkSheet({
-                studentId: studentId,
-                examType: examType,
-                subjects: subjectsArray,
-                totalMarks: totalPossibleMarks,
-                obtainedMarks: obtainedMarks,
+                studentId,
+                examType,
+                subjects,
+                totalMarks,
+                obtainedMarks,
                 percentage: percentage.toFixed(2),
-                overallRemarks: overallRemarks
+                overallRemarks: "No overall remarks"
             });
 
             await marksheet.save();
+            results.push({ studentId, message: "Marksheet saved successfully" });
         }
 
-        fs.unlinkSync(file.path); // Remove the file after processing
-        res.status(201).send("marksheets assigned from Excel");
+        res.status(200).json({ message: "Excel data processed", results });
+
     } catch (error) {
-        console.error('Error assigning marksheets from Excel:', error);
-        res.status(500).send({ error: 'Error assigning marksheets from Excel.' });
+        console.error("Error processing file:", error);
+        res.status(500).json({ error: "Error processing file.", details: error.message });
     }
 };
 
 const setWorkingDaysFromExcel = async (req, res) => {
     try {
-        const file = req.file;
-        const workbook = xlsx.readFile(file.path);
-        const sheetName = workbook.SheetNames[0];
-        const sheet = workbook.Sheets[sheetName];
-        const data = xlsx.utils.sheet_to_json(sheet);
-
         const teacher = req.teacher;
         if (!teacher || !teacher.classTeacher) {
             return res.status(403).send({ error: "You are not authorized to set working days." });
         }
 
-        for (const row of data) {
-            const { month, workingDays } = row;
-            const workingDaysDates = workingDays.split(',').map(day => new Date(day));
-
-            let schoolDoc = await SchoolWorkingDay.findOne({
-                class: teacher.classTeacher.class,
-                division: teacher.classTeacher.division
-            });
-
-            if (!schoolDoc) {
-                schoolDoc = new SchoolWorkingDay({
-                    class: teacher.classTeacher.class,
-                    division: teacher.classTeacher.division,
-                    attendance: [{
-                        month,
-                        workingDays: workingDaysDates
-                    }]
-                });
-            } else {
-                let monthRecord = schoolDoc.attendance.find(item => item.month === month);
-                if (!monthRecord) {
-                    schoolDoc.attendance.push({ month, workingDays: workingDaysDates });
-                } else {
-                    monthRecord.workingDays = workingDaysDates;
-                }
-            }
-
-            await schoolDoc.save();
+        if (!req.file) {
+            return res.status(400).send({ error: "No file uploaded." });
         }
 
-        fs.unlinkSync(file.path); // Remove the file after processing
-        res.status(200).send({ message: "Working days set from Excel successfully." });
+        // Read Excel file
+        const workbook = xlsx.read(req.file.buffer, { type: "buffer" });
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        const jsonData = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+
+        if (jsonData.length < 4) {
+            return res.status(400).send({ error: "Invalid Excel format. Ensure correct structure!" });
+        }
+
+        const headers = jsonData[0]; // First row: should contain "month"
+        const months = jsonData[1]; // Second row: Actual months (e.g., "March 2025")
+        const workingDaysHeader = jsonData[2]; // Third row: should be "workingDays"
+
+        const attendanceData = [];
+
+        months.forEach((month, col) => {
+            if (
+                !month ||
+                !workingDaysHeader[col] ||
+                typeof workingDaysHeader[col] !== "string" ||
+                workingDaysHeader[col].trim().toLowerCase() !== "workingdays"
+            ) {
+                return; // Skip if no valid month or workingDays header
+            }
+
+            const workingDays = jsonData
+                .slice(3) // Start from row 4 (index 3)
+                .map(row => row[col])
+                .filter(dateStr => dateStr) // Remove empty values
+                .map(dateStr => {
+                    if (typeof dateStr === "string" && dateStr.includes("-")) {
+                        // Convert DD-MM-YYYY to YYYY-MM-DD
+                        const [day, month, year] = dateStr.split("-").map(Number);
+                        return new Date(`${year}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`);
+                    } else if (!isNaN(dateStr)) {
+                        // Handle Excel numeric dates (Excel stores dates as numbers)
+                        const excelEpoch = new Date(1899, 11, 30);
+                        return new Date(excelEpoch.getTime() + (dateStr * 86400000));
+                    } else {
+                        console.warn(`Skipping invalid date: ${dateStr}`);
+                        return null;
+                    }
+                })
+                .filter(date => date instanceof Date && !isNaN(date)); // Remove invalid dates
+
+            if (workingDays.length > 0) {
+                attendanceData.push({ month, workingDays });
+            }
+        });
+
+        if (attendanceData.length === 0) {
+            return res.status(400).send({ error: "No valid working days found in the file. Check date format!" });
+        }
+
+        // Find or create the working days record
+        let schoolDoc = await SchoolWorkingDay.findOne({
+            class: teacher.classTeacher.class,
+            division: teacher.classTeacher.division
+        });
+
+        if (!schoolDoc) {
+            schoolDoc = new SchoolWorkingDay({
+                class: teacher.classTeacher.class,
+                division: teacher.classTeacher.division,
+                attendance: attendanceData
+            });
+        } else {
+            // Update existing document
+            attendanceData.forEach(({ month, workingDays }) => {
+                let monthRecord = schoolDoc.attendance.find(item => item.month === month);
+                if (!monthRecord) {
+                    schoolDoc.attendance.push({ month, workingDays });
+                } else {
+                    monthRecord.workingDays = workingDays;
+                }
+            });
+        }
+
+        await schoolDoc.save();
+        res.status(200).send({ message: "Working days set successfully." });
     } catch (error) {
-        console.error("Error setting working days from Excel: ", error);
-        res.status(500).send({ error: "Error setting working days from Excel.", details: error.message });
+        console.error("Error setting working days: ", error);
+        res.status(500).send({ error: "Error setting working days.", details: error.message });
     }
 };
 
 const assignAttendanceFromExcel = async (req, res) => {
     try {
-        const file = req.file;
-        const workbook = xlsx.readFile(file.path);
-        const sheetName = workbook.SheetNames[0];
-        const sheet = workbook.Sheets[sheetName];
-        const data = xlsx.utils.sheet_to_json(sheet);
-
-        const teacher = req.teacher;
-        if (!teacher || !teacher.classTeacher) {
-            return res.status(403).send({ error: "You are not authorized to assign attendance." });
+        if (!req.file) {
+            return res.status(400).send({ error: "No file uploaded." });
         }
 
-        for (const row of data) {
-            const { studentId, month, presentDates } = row;
-            const student = await Student.findById(studentId);
-            if (!student) {
-                continue;
-            }
-            if (student.class !== teacher.classTeacher.class || student.division !== teacher.classTeacher.division) {
+        // Read Excel file
+        const workbook = xlsx.read(req.file.buffer, { type: "buffer" });
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        const jsonData = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+
+        if (jsonData.length < 6) {
+            return res.status(400).json({ error: "Invalid Excel format." });
+        }
+
+        const studentIdHeader = jsonData[0]; // Row 1: "studentId"
+        const studentIds = jsonData[1]; // Row 2: Actual student IDs
+        const monthHeader = jsonData[2]; // Row 3: "month"
+        const months = jsonData[3]; // Row 4: Actual month value
+        const presentDatesHeader = jsonData[4]; // Row 5: "presentDates"
+        const dateEntries = jsonData.slice(5); // Row 6 onwards: Present dates
+
+        let results = [];
+
+        for (let col = 0; col < studentIds.length; col++) {
+            const studentId = studentIds[col]?.toString().trim();
+            const month = months[col]?.toString().trim();
+
+            if (!studentId || !mongoose.Types.ObjectId.isValid(studentId)) {
+                console.warn(`Invalid studentId: ${studentId}`);
                 continue;
             }
 
-            const convertedPresentDates = presentDates.split(',').map(dateStr => new Date(dateStr));
+            const student = await Student.findById(studentId);
+            if (!student) {
+                results.push({ studentId, error: "Student not found" });
+                continue;
+            }
+
+            // Get school working days
             const schoolDoc = await SchoolWorkingDay.findOne({
-                class: teacher.classTeacher.class,
-                division: teacher.classTeacher.division
+                class: student.class,
+                division: student.division
             });
+
+            if (!schoolDoc) {
+                results.push({ studentId, error: "Working days not set for class" });
+                continue;
+            }
+
             const monthWorkingRecord = schoolDoc.attendance.find(item => item.month === month);
-            const workingDays = monthWorkingRecord.workingDays.map(day => new Date(day));
-            const presentSet = new Set(convertedPresentDates.map(d => d.toDateString()));
-            const absentDates = workingDays.filter(day => !presentSet.has(day.toDateString()));
+            if (!monthWorkingRecord) {
+                results.push({ studentId, error: "Working days not set for month" });
+                continue;
+            }
+
+            const workingDays = monthWorkingRecord.workingDays;
+
+            // Extract present dates
+            const presentDates = dateEntries
+                .map(row => row[col])
+                .filter(dateStr => dateStr)
+                .map(dateStr => {
+                    if (typeof dateStr === "string" && dateStr.includes("-")) {
+                        const [year, month, day] = dateStr.split("-").map(Number);
+                        return new Date(`${year}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`);
+                    } else if (!isNaN(dateStr)) {
+                        const excelEpoch = new Date(1899, 11, 30);
+                        return new Date(excelEpoch.getTime() + (dateStr * 86400000));
+                    } else {
+                        console.warn(`Skipping invalid date: ${dateStr}`);
+                        return null;
+                    }
+                })
+                .filter(date => date instanceof Date && !isNaN(date));
+
+            // ✅ Fix Absent Days Calculation
+            const presentSet = new Set(presentDates.map(d => d.toDateString()));
+
+            // Convert workingDays to Date objects and match properly
+            const absentDates = workingDays
+                .map(day => new Date(day)) // Convert working days to Date objects
+                .filter(day => !presentSet.has(day.toDateString())); // Correct filtering
+
             const presentPercent = (presentDates.length / workingDays.length) * 100;
 
             let attendanceDoc = await Attendance.findOne({ studentId });
+
             if (!attendanceDoc) {
                 attendanceDoc = new Attendance({ studentId, attendance: [] });
             }
 
-            let monthRecordInAttendance = attendanceDoc.attendance.find(item => item.month === month);
-            if (!monthRecordInAttendance) {
-                attendanceDoc.attendance.push({
-                    month,
-                    presentDates: convertedPresentDates,
-                    absentDates,
-                    presentpercent: presentPercent
-                });
+            let monthRecord = attendanceDoc.attendance.find(item => item.month === month);
+
+            if (!monthRecord) {
+                // ✅ If the month does not exist, push a new record
+                await Attendance.updateOne(
+                    { studentId },
+                    {
+                        $push: {
+                            attendance: {
+                                month,
+                                presentDates,
+                                absentDates,
+                                presentpercent: presentPercent
+                            }
+                        }
+                    },
+                    { upsert: true }
+                );
             } else {
-                monthRecordInAttendance.presentDates = convertedPresentDates;
-                monthRecordInAttendance.absentDates = absentDates;
-                monthRecordInAttendance.presentpercent = presentPercent;
+                // ✅ If the month exists, use $set safely
+                await Attendance.updateOne(
+                    { studentId, "attendance.month": month },
+                    {
+                        $set: {
+                            "attendance.$.presentDates": presentDates,
+                            "attendance.$.absentDates": absentDates,
+                            "attendance.$.presentpercent": presentPercent
+                        }
+                    }
+                );
             }
 
-            await attendanceDoc.save();
+            results.push({
+                studentId,
+                studentName: student.fullName,
+                month,
+                totalWorkingDays: workingDays.length,
+                presentDays: presentDates.length,
+                absentDays: absentDates.length, // ✅ Now correctly calculated!
+                presentPercent: presentPercent.toFixed(2)
+            });
         }
 
-        fs.unlinkSync(file.path); // Remove the file after processing
-        res.status(200).send({ message: "Attendance assigned from Excel successfully." });
+        res.status(200).json({
+            message: "Attendance processed successfully",
+            totalRecords: results.length,
+            results
+        });
+
     } catch (error) {
-        console.error("Error assigning attendance from Excel: ", error);
-        res.status(500).send({ error: "Error assigning attendance from Excel.", details: error.message });
+        console.error("Error processing attendance:", error);
+        res.status(500).json({
+            error: "Error processing attendance",
+            details: error.message
+        });
     }
 };
-
 export { 
     login, 
     assignMarksheet, 
