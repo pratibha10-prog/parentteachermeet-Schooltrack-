@@ -708,194 +708,10 @@ const getChatHistory = async (req, res) => {
     }
 };
 
-const assignMarksheetFromExcel = async (req, res) => {
-    try {
-        if (!req.file) {
-            return res.status(400).json({ error: "No file uploaded." });
-        }
-
-        console.log("File received:", req.file.originalname);
-
-        // Read Excel file
-        const workbook = xlsx.read(req.file.buffer, { type: "buffer" });
-        const sheetName = workbook.SheetNames[0];
-        const sheet = workbook.Sheets[sheetName];
-        const jsonData = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: "" });
-
-        if (jsonData.length < 2) {
-            return res.status(400).json({ error: "Invalid Excel format." });
-        }
-
-        const headers = jsonData[0];
-
-        const results = [];
-        for (let i = 1; i < jsonData.length; i++) {
-            const row = jsonData[i];
-            if (!row[0]) continue; // Skip empty rows
-
-            const studentId = row[0];
-            const examType = row[1];
-
-            // Check if student exists
-            const student = await Student.findById(studentId);
-            if (!student) {
-                console.log(`Student not found: ${studentId}`);
-                results.push({ studentId, error: "Student not found" });
-                continue;
-            }
-
-            let subjects = [];
-            let obtainedMarks = 0;
-            let totalMarks = 0;
-
-            // Process subjects dynamically
-            for (let j = 2; j < headers.length; j += 4) {
-                if (!row[j]) break; // Stop if subject is missing
-
-                let subject = row[j];
-                let marks = parseInt(row[j + 1]) || 0;
-                let maxMarks = parseInt(row[j + 2]) || 100;
-                let teacherRemarks = row[j + 3] || "No remark";
-
-                obtainedMarks += marks;
-                totalMarks += maxMarks;
-
-                subjects.push({
-                    subject,
-                    marks,
-                    totalMarks: maxMarks,
-                    teacherRemarks,
-                });
-            }
-
-            // Calculate percentage
-            const percentage = (obtainedMarks / totalMarks) * 100;
-
-            // Save to database
-            const marksheet = new MarkSheet({
-                studentId,
-                examType,
-                subjects,
-                totalMarks,
-                obtainedMarks,
-                percentage: percentage.toFixed(2),
-                overallRemarks: "No overall remarks"
-            });
-
-            await marksheet.save();
-            results.push({ studentId, message: "Marksheet saved successfully" });
-        }
-
-        res.status(200).json({ message: "Excel data processed", results });
-
-    } catch (error) {
-        console.error("Error processing file:", error);
-        res.status(500).json({ error: "Error processing file.", details: error.message });
-    }
-};
-
-const setWorkingDaysFromExcel = async (req, res) => {
-    try {
-        const teacher = req.teacher;
-        if (!teacher || !teacher.classTeacher) {
-            return res.status(403).send({ error: "You are not authorized to set working days." });
-        }
-
-        if (!req.file) {
-            return res.status(400).send({ error: "No file uploaded." });
-        }
-
-        // Read Excel file
-        const workbook = xlsx.read(req.file.buffer, { type: "buffer" });
-        const sheetName = workbook.SheetNames[0];
-        const sheet = workbook.Sheets[sheetName];
-        const jsonData = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: "" });
-
-        if (jsonData.length < 4) {
-            return res.status(400).send({ error: "Invalid Excel format. Ensure correct structure!" });
-        }
-
-        const headers = jsonData[0]; // First row: should contain "month"
-        const months = jsonData[1]; // Second row: Actual months (e.g., "March 2025")
-        const workingDaysHeader = jsonData[2]; // Third row: should be "workingDays"
-
-        const attendanceData = [];
-
-        months.forEach((month, col) => {
-            if (
-                !month ||
-                !workingDaysHeader[col] ||
-                typeof workingDaysHeader[col] !== "string" ||
-                workingDaysHeader[col].trim().toLowerCase() !== "workingdays"
-            ) {
-                return; // Skip if no valid month or workingDays header
-            }
-
-            const workingDays = jsonData
-                .slice(3) // Start from row 4 (index 3)
-                .map(row => row[col])
-                .filter(dateStr => dateStr) // Remove empty values
-                .map(dateStr => {
-                    if (typeof dateStr === "string" && dateStr.includes("-")) {
-                        // Convert DD-MM-YYYY to YYYY-MM-DD
-                        const [day, month, year] = dateStr.split("-").map(Number);
-                        return new Date(`${year}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`);
-                    } else if (!isNaN(dateStr)) {
-                        // Handle Excel numeric dates (Excel stores dates as numbers)
-                        const excelEpoch = new Date(1899, 11, 30);
-                        return new Date(excelEpoch.getTime() + (dateStr * 86400000));
-                    } else {
-                        console.warn(`Skipping invalid date: ${dateStr}`);
-                        return null;
-                    }
-                })
-                .filter(date => date instanceof Date && !isNaN(date)); // Remove invalid dates
-
-            if (workingDays.length > 0) {
-                attendanceData.push({ month, workingDays });
-            }
-        });
-
-        if (attendanceData.length === 0) {
-            return res.status(400).send({ error: "No valid working days found in the file. Check date format!" });
-        }
-
-        // Find or create the working days record
-        let schoolDoc = await SchoolWorkingDay.findOne({
-            class: teacher.classTeacher.class,
-            division: teacher.classTeacher.division
-        });
-
-        if (!schoolDoc) {
-            schoolDoc = new SchoolWorkingDay({
-                class: teacher.classTeacher.class,
-                division: teacher.classTeacher.division,
-                attendance: attendanceData
-            });
-        } else {
-            // Update existing document
-            attendanceData.forEach(({ month, workingDays }) => {
-                let monthRecord = schoolDoc.attendance.find(item => item.month === month);
-                if (!monthRecord) {
-                    schoolDoc.attendance.push({ month, workingDays });
-                } else {
-                    monthRecord.workingDays = workingDays;
-                }
-            });
-        }
-
-        await schoolDoc.save();
-        res.status(200).send({ message: "Working days set successfully." });
-    } catch (error) {
-        console.error("Error setting working days: ", error);
-        res.status(500).send({ error: "Error setting working days.", details: error.message });
-    }
-};
-
 const assignAttendanceFromExcel = async (req, res) => {
     try {
         if (!req.file) {
-            return res.status(400).send({ error: "No file uploaded." });
+            return res.status(400).json({ error: "No file uploaded." });
         }
 
         // Read Excel file
@@ -908,50 +724,55 @@ const assignAttendanceFromExcel = async (req, res) => {
             return res.status(400).json({ error: "Invalid Excel format." });
         }
 
-        const studentIdHeader = jsonData[0]; // Row 1: "studentId"
-        const studentIds = jsonData[1]; // Row 2: Actual student IDs
-        const monthHeader = jsonData[2]; // Row 3: "month"
-        const months = jsonData[3]; // Row 4: Actual month value
-        const presentDatesHeader = jsonData[4]; // Row 5: "presentDates"
-        const dateEntries = jsonData.slice(5); // Row 6 onwards: Present dates
+        // The excel file format:
+        // Row 1: "roll" header (roll numbers for students)
+        // Row 2: Actual roll numbers
+        // Row 3: "month" header
+        // Row 4: Actual month value (e.g., "March 2025")
+        // Row 5: "presentDates" header
+        // Row 6 onwards: Present dates for each student (organized by column)
+        const rollHeader = jsonData[0];           // Contains header such as "roll"
+        const rollNumbers = jsonData[1];            // Row 2: Actual roll numbers
+        const monthHeader = jsonData[2];            // Row 3: "month"
+        const months = jsonData[3];                 // Row 4: Actual month value per student
+        const presentDatesHeader = jsonData[4];     // Row 5: "presentDates"
+        const dateEntries = jsonData.slice(5);      // Row 6+: Present dates
 
         let results = [];
 
-        for (let col = 0; col < studentIds.length; col++) {
-            const studentId = studentIds[col]?.toString().trim();
+        // Loop over every column (each student entry)
+        for (let col = 0; col < rollNumbers.length; col++) {
+            const rollStr = rollNumbers[col]?.toString().trim();
             const month = months[col]?.toString().trim();
 
-            if (!studentId || !mongoose.Types.ObjectId.isValid(studentId)) {
-                console.warn(`Invalid studentId: ${studentId}`);
-                continue;
-            }
+            if (!rollStr) continue; // Skip if roll number is missing
 
-            const student = await Student.findById(studentId);
+            // Find student via roll rather than by id
+            const student = await Student.findOne({ roll: parseInt(rollStr) });
             if (!student) {
-                results.push({ studentId, error: "Student not found" });
+                results.push({ roll: rollStr, error: "Student not found" });
                 continue;
             }
 
-            // Get school working days
+            // Get school working days for the student's class & division
             const schoolDoc = await SchoolWorkingDay.findOne({
                 class: student.class,
                 division: student.division
             });
-
             if (!schoolDoc) {
-                results.push({ studentId, error: "Working days not set for class" });
+                results.push({ roll: rollStr, error: "Working days not set for class" });
                 continue;
             }
 
             const monthWorkingRecord = schoolDoc.attendance.find(item => item.month === month);
             if (!monthWorkingRecord) {
-                results.push({ studentId, error: "Working days not set for month" });
+                results.push({ roll: rollStr, error: "Working days not set for month" });
                 continue;
             }
 
             const workingDays = monthWorkingRecord.workingDays;
 
-            // Extract present dates
+            // Extract present dates from dateEntries
             const presentDates = dateEntries
                 .map(row => row[col])
                 .filter(dateStr => dateStr)
@@ -969,28 +790,24 @@ const assignAttendanceFromExcel = async (req, res) => {
                 })
                 .filter(date => date instanceof Date && !isNaN(date));
 
-            // ✅ Fix Absent Days Calculation
+            // Calculate absent dates based on working days
             const presentSet = new Set(presentDates.map(d => d.toDateString()));
-
-            // Convert workingDays to Date objects and match properly
             const absentDates = workingDays
-                .map(day => new Date(day)) // Convert working days to Date objects
-                .filter(day => !presentSet.has(day.toDateString())); // Correct filtering
+                .map(day => new Date(day)) // cast working days to Date objects
+                .filter(day => !presentSet.has(day.toDateString()));
 
             const presentPercent = (presentDates.length / workingDays.length) * 100;
 
-            let attendanceDoc = await Attendance.findOne({ studentId });
-
+            let attendanceDoc = await Attendance.findOne({ studentId: student._id });
             if (!attendanceDoc) {
-                attendanceDoc = new Attendance({ studentId, attendance: [] });
+                attendanceDoc = new Attendance({ studentId: student._id, attendance: [] });
             }
 
             let monthRecord = attendanceDoc.attendance.find(item => item.month === month);
-
             if (!monthRecord) {
-                // ✅ If the month does not exist, push a new record
+                // If month record does not exist, push a new record using $push and upsert
                 await Attendance.updateOne(
-                    { studentId },
+                    { studentId: student._id },
                     {
                         $push: {
                             attendance: {
@@ -1004,9 +821,9 @@ const assignAttendanceFromExcel = async (req, res) => {
                     { upsert: true }
                 );
             } else {
-                // ✅ If the month exists, use $set safely
+                // Else, update the record using $set
                 await Attendance.updateOne(
-                    { studentId, "attendance.month": month },
+                    { studentId: student._id, "attendance.month": month },
                     {
                         $set: {
                             "attendance.$.presentDates": presentDates,
@@ -1018,12 +835,12 @@ const assignAttendanceFromExcel = async (req, res) => {
             }
 
             results.push({
-                studentId,
+                roll: rollStr,
                 studentName: student.fullName,
                 month,
                 totalWorkingDays: workingDays.length,
                 presentDays: presentDates.length,
-                absentDays: absentDates.length, // ✅ Now correctly calculated!
+                absentDays: absentDates.length,
                 presentPercent: presentPercent.toFixed(2)
             });
         }
@@ -1033,7 +850,6 @@ const assignAttendanceFromExcel = async (req, res) => {
             totalRecords: results.length,
             results
         });
-
     } catch (error) {
         console.error("Error processing attendance:", error);
         res.status(500).json({
