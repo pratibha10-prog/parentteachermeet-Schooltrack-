@@ -708,156 +708,361 @@ const getChatHistory = async (req, res) => {
     }
 };
 
-const assignAttendanceFromExcel = async (req, res) => {
+
+const setWorkingDaysFromExcel = async (req, res) => {
     try {
-        if (!req.file) {
-            return res.status(400).json({ error: "No file uploaded." });
+      const teacher = req.teacher;
+      if (!teacher || !teacher.classTeacher) {
+        return res.status(403).send({ error: "You are not authorized to set working days." });
+      }
+      
+      if (!req.file) {
+        return res.status(400).send({ error: "No file uploaded." });
+      }
+      
+      // Read Excel file and convert it to JSON
+      const workbook = xlsx.read(req.file.buffer, { type: "buffer" });
+      const sheetName = workbook.SheetNames[0];
+      const sheet = workbook.Sheets[sheetName];
+      const jsonData = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+      
+      // Expecting at least 4 rows: headers, month, workingDays header, and dates
+      if (jsonData.length < 4) {
+        return res.status(400).send({ error: "Invalid Excel format. Ensure correct structure!" });
+      }
+      
+      // Expected Excel template format:
+      // Row 1: Header row with titles (e.g., "month")
+      // Row 2: Actual month values for each column (e.g., "March 2025")
+      // Row 3: Working days header: each cell should contain "workingDays" (case-insensitive)
+      // Row 4 onwards: Each column contains date entries (in DD-MM-YYYY format or Excel numeric dates) representing working days
+      const headers = jsonData[0]; // e.g., ["month", "month", ...]
+      const months = jsonData[1];  // e.g., ["March 2025", "March 2025", ...]
+      const workingDaysHeader = jsonData[2]; // Should be "workingDays" in each column
+      
+      const attendanceData = [];
+      
+      months.forEach((month, col) => {
+        if (
+          !month ||
+          !workingDaysHeader[col] ||
+          typeof workingDaysHeader[col] !== "string" ||
+          workingDaysHeader[col].trim().toLowerCase() !== "workingdays"
+        ) {
+          return; // Skip if no valid month or workingDays header in a column
         }
-
-        // Read Excel file
-        const workbook = xlsx.read(req.file.buffer, { type: "buffer" });
-        const sheetName = workbook.SheetNames[0];
-        const sheet = workbook.Sheets[sheetName];
-        const jsonData = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: "" });
-
-        if (jsonData.length < 6) {
-            return res.status(400).json({ error: "Invalid Excel format." });
-        }
-
-        // The excel file format:
-        // Row 1: "roll" header (roll numbers for students)
-        // Row 2: Actual roll numbers
-        // Row 3: "month" header
-        // Row 4: Actual month value (e.g., "March 2025")
-        // Row 5: "presentDates" header
-        // Row 6 onwards: Present dates for each student (organized by column)
-        const rollHeader = jsonData[0];           // Contains header such as "roll"
-        const rollNumbers = jsonData[1];            // Row 2: Actual roll numbers
-        const monthHeader = jsonData[2];            // Row 3: "month"
-        const months = jsonData[3];                 // Row 4: Actual month value per student
-        const presentDatesHeader = jsonData[4];     // Row 5: "presentDates"
-        const dateEntries = jsonData.slice(5);      // Row 6+: Present dates
-
-        let results = [];
-
-        // Loop over every column (each student entry)
-        for (let col = 0; col < rollNumbers.length; col++) {
-            const rollStr = rollNumbers[col]?.toString().trim();
-            const month = months[col]?.toString().trim();
-
-            if (!rollStr) continue; // Skip if roll number is missing
-
-            // Find student via roll rather than by id
-            const student = await Student.findOne({ roll: parseInt(rollStr) });
-            if (!student) {
-                results.push({ roll: rollStr, error: "Student not found" });
-                continue;
-            }
-
-            // Get school working days for the student's class & division
-            const schoolDoc = await SchoolWorkingDay.findOne({
-                class: student.class,
-                division: student.division
-            });
-            if (!schoolDoc) {
-                results.push({ roll: rollStr, error: "Working days not set for class" });
-                continue;
-            }
-
-            const monthWorkingRecord = schoolDoc.attendance.find(item => item.month === month);
-            if (!monthWorkingRecord) {
-                results.push({ roll: rollStr, error: "Working days not set for month" });
-                continue;
-            }
-
-            const workingDays = monthWorkingRecord.workingDays;
-
-            // Extract present dates from dateEntries
-            const presentDates = dateEntries
-                .map(row => row[col])
-                .filter(dateStr => dateStr)
-                .map(dateStr => {
-                    if (typeof dateStr === "string" && dateStr.includes("-")) {
-                        const [year, month, day] = dateStr.split("-").map(Number);
-                        return new Date(`${year}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`);
-                    } else if (!isNaN(dateStr)) {
-                        const excelEpoch = new Date(1899, 11, 30);
-                        return new Date(excelEpoch.getTime() + (dateStr * 86400000));
-                    } else {
-                        console.warn(`Skipping invalid date: ${dateStr}`);
-                        return null;
-                    }
-                })
-                .filter(date => date instanceof Date && !isNaN(date));
-
-            // Calculate absent dates based on working days
-            const presentSet = new Set(presentDates.map(d => d.toDateString()));
-            const absentDates = workingDays
-                .map(day => new Date(day)) // cast working days to Date objects
-                .filter(day => !presentSet.has(day.toDateString()));
-
-            const presentPercent = (presentDates.length / workingDays.length) * 100;
-
-            let attendanceDoc = await Attendance.findOne({ studentId: student._id });
-            if (!attendanceDoc) {
-                attendanceDoc = new Attendance({ studentId: student._id, attendance: [] });
-            }
-
-            let monthRecord = attendanceDoc.attendance.find(item => item.month === month);
-            if (!monthRecord) {
-                // If month record does not exist, push a new record using $push and upsert
-                await Attendance.updateOne(
-                    { studentId: student._id },
-                    {
-                        $push: {
-                            attendance: {
-                                month,
-                                presentDates,
-                                absentDates,
-                                presentpercent: presentPercent
-                            }
-                        }
-                    },
-                    { upsert: true }
-                );
+        
+        // Get working day entries from row 4 onwards for current column
+        const workingDays = jsonData
+          .slice(3) // Rows 4 onwards
+          .map(row => row[col])
+          .filter(dateStr => dateStr) // Remove empty cells
+          .map(dateStr => {
+            if (typeof dateStr === "string" && dateStr.includes("-")) {
+              // Expected format: DD-MM-YYYY -> Convert to YYYY-MM-DD
+              const [day, m, year] = dateStr.split("-").map(Number);
+              return new Date(`${year}-${m.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`);
+            } else if (!isNaN(dateStr)) {
+              // For Excel numeric dates; Excel date 1 equals 1900-01-01 but using epoch offset 1899,11,30
+              const excelEpoch = new Date(1899, 11, 30);
+              return new Date(excelEpoch.getTime() + (dateStr * 86400000));
             } else {
-                // Else, update the record using $set
-                await Attendance.updateOne(
-                    { studentId: student._id, "attendance.month": month },
-                    {
-                        $set: {
-                            "attendance.$.presentDates": presentDates,
-                            "attendance.$.absentDates": absentDates,
-                            "attendance.$.presentpercent": presentPercent
-                        }
-                    }
-                );
+              console.warn(`Skipping invalid date: ${dateStr}`);
+              return null;
             }
-
-            results.push({
-                roll: rollStr,
-                studentName: student.fullName,
-                month,
-                totalWorkingDays: workingDays.length,
-                presentDays: presentDates.length,
-                absentDays: absentDates.length,
-                presentPercent: presentPercent.toFixed(2)
-            });
+          })
+          .filter(date => date instanceof Date && !isNaN(date));
+        
+        if (workingDays.length > 0) {
+          attendanceData.push({ month, workingDays });
         }
-
-        res.status(200).json({
-            message: "Attendance processed successfully",
-            totalRecords: results.length,
-            results
+      });
+      
+      if (attendanceData.length === 0) {
+        return res.status(400).send({ error: "No valid working days found in the file. Check date format!" });
+      }
+      
+      // Find or create the SchoolWorkingDay document for teacher's assigned class/division
+      let schoolDoc = await SchoolWorkingDay.findOne({
+        class: teacher.classTeacher.class,
+        division: teacher.classTeacher.division
+      });
+      
+      if (!schoolDoc) {
+        schoolDoc = new SchoolWorkingDay({
+          class: teacher.classTeacher.class,
+          division: teacher.classTeacher.division,
+          attendance: attendanceData
         });
+      } else {
+        // Update existing attendance data; add new month records or update existing ones
+        attendanceData.forEach(({ month, workingDays }) => {
+          let monthRecord = schoolDoc.attendance.find(item => item.month === month);
+          if (!monthRecord) {
+            schoolDoc.attendance.push({ month, workingDays });
+          } else {
+            monthRecord.workingDays = workingDays;
+          }
+        });
+      }
+      
+      await schoolDoc.save();
+      res.status(200).send({ message: "Working days set successfully." });
     } catch (error) {
-        console.error("Error processing attendance:", error);
-        res.status(500).json({
-            error: "Error processing attendance",
-            details: error.message
-        });
+      console.error("Error setting working days:", error);
+      res.status(500).send({ error: "Error setting working days.", details: error.message });
     }
+  };
+  
+  export { setWorkingDaysFromExcel };
+const assignAttendanceFromExcel = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).send({ error: "No file uploaded." });
+    }
+
+    // Read Excel file; sample expected format:
+    // Row 1: Header "roll", "month", "presentDates", ...
+    // Row 2: Roll numbers for students (one per column)
+    // Row 3: Month header (e.g., "March 2025")
+    // Row 4: Actual month value per student (or same value for all)
+    // Row 5: "presentDates" header
+    // Row 6+: Each column: present date entries
+    const workbook = xlsx.read(req.file.buffer, { type: "buffer" });
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const jsonData = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+
+    if (jsonData.length < 6) {
+      return res.status(400).json({ error: "Invalid Excel format." });
+    }
+
+    const rollNumbers = jsonData[1]; // Row 2: Roll numbers
+    const months = jsonData[3]; // Row 4: Month (e.g., "March 2025")
+    const dateEntries = jsonData.slice(5); // Row 6 onwards: present dates per column
+
+    let results = [];
+
+    for (let col = 0; col < rollNumbers.length; col++) {
+      const rollStr = rollNumbers[col]?.toString().trim();
+      const month = months[col]?.toString().trim();
+      if (!rollStr) continue;
+      const roll = parseInt(rollStr);
+
+      // Find student using teacher's assigned class/division and roll
+      const student = await findStudentByRoll(roll, req.teacher);
+      if (!student) {
+        results.push({ roll, error: "Student not found in your class/division" });
+        continue;
+      }
+
+      // Get school working days for student's class/division
+      const schoolDoc = await SchoolWorkingDay.findOne({
+        class: student.class,
+        division: student.division
+      });
+      if (!schoolDoc) {
+        results.push({ roll, error: "Working days not set for class" });
+        continue;
+      }
+      const monthWorkingRecord = schoolDoc.attendance.find(item => item.month === month);
+      if (!monthWorkingRecord) {
+        results.push({ roll, error: "Working days not set for month" });
+        continue;
+      }
+      const workingDays = monthWorkingRecord.workingDays;
+
+      // Extract present dates for the student from each row (Excel column)
+      const presentDates = dateEntries
+        .map(row => row[col])
+        .filter(dateStr => dateStr)
+        .map(dateStr => {
+          if (typeof dateStr === "string" && dateStr.includes("-")) {
+            const [year, m, day] = dateStr.split("-").map(Number);
+            return new Date(`${year}-${m.toString().padStart(2,"0")}-${day.toString().padStart(2,"0")}`);
+          } else if (!isNaN(dateStr)) {
+            const excelEpoch = new Date(1899, 11, 30);
+            return new Date(excelEpoch.getTime() + (dateStr * 86400000));
+          } else {
+            console.warn(`Skipping invalid date: ${dateStr}`);
+            return null;
+          }
+        })
+        .filter(date => date instanceof Date && !isNaN(date));
+
+      // Calculate absent dates by comparing with working days
+      const presentSet = new Set(presentDates.map(d => d.toDateString()));
+      const absentDates = workingDays
+        .map(day => new Date(day))
+        .filter(day => !presentSet.has(day.toDateString()));
+
+      const presentPercent = (presentDates.length / workingDays.length) * 100;
+
+      let attendanceDoc = await Attendance.findOne({ studentId: student._id });
+      if (!attendanceDoc) {
+        attendanceDoc = new Attendance({ studentId: student._id, attendance: [] });
+      }
+      let monthRecord = attendanceDoc.attendance.find(item => item.month === month);
+      if (!monthRecord) {
+        await Attendance.updateOne(
+          { studentId: student._id },
+          {
+            $push: {
+              attendance: {
+                month,
+                presentDates,
+                absentDates,
+                presentpercent: presentPercent
+              }
+            }
+          },
+          { upsert: true }
+        );
+      } else {
+        await Attendance.updateOne(
+          { studentId: student._id, "attendance.month": month },
+          {
+            $set: {
+              "attendance.$.presentDates": presentDates,
+              "attendance.$.absentDates": absentDates,
+              "attendance.$.presentpercent": presentPercent
+            }
+          }
+        );
+      }
+
+      results.push({
+        roll,
+        studentName: student.fullName,
+        month,
+        totalWorkingDays: workingDays.length,
+        presentDays: presentDates.length,
+        absentDays: absentDates.length,
+        presentPercent: presentPercent.toFixed(2)
+      });
+    }
+
+    res.status(200).json({
+      message: "Attendance processed successfully",
+      totalRecords: results.length,
+      results
+    });
+  } catch (error) {
+    console.error("Error processing attendance:", error);
+    res.status(500).json({
+      error: "Error processing attendance",
+      details: error.message
+    });
+  }
 };
+import xlsx from 'xlsx';
+import { MarkSheet } from '../model.js';
+import { findStudentByRoll } from './findStudentByRoll.js';
+
+const assignMarksheetFromExcel = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded." });
+    }
+
+    console.log("File received:", req.file.originalname);
+
+    // Read Excel file
+    const workbook = xlsx.read(req.file.buffer, { type: "buffer" });
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const jsonData = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+
+    if (jsonData.length < 2) {
+      return res.status(400).json({ error: "Invalid Excel format." });
+    }
+
+    const headers = jsonData[0]; // Expected headers: [ "roll", "examType", "Subject1", "Marks1", "Total1", "Remarks1", ... ]
+
+    const results = [];
+    for (let i = 1; i < jsonData.length; i++) {
+      const row = jsonData[i];
+      if (!row[0]) continue; // Skip empty rows
+
+      // row[0] should be the roll number
+      const roll = parseInt(row[0]);
+      const examType = row[1];
+
+      // Find student using teacher's assigned class/division and roll
+      const student = await findStudentByRoll(roll, req.teacher);
+      if (!student) {
+        console.log(`Student with roll ${roll} not found in your class/division.`);
+        results.push({ roll, error: "Student not found" });
+        continue;
+      }
+
+      let subjects = [];
+      let obtainedMarks = 0;
+      let totalMarks = 0;
+
+      // Process subjects dynamically (assume each subject takes 4 columns)
+      for (let j = 2; j < headers.length; j += 4) {
+        if (!row[j]) break;
+
+        let subject = row[j];
+        let marks = parseInt(row[j + 1]) || 0;
+        let maxMarks = parseInt(row[j + 2]) || 100;
+        let teacherRemarks = row[j + 3] || "No remark";
+
+        obtainedMarks += marks;
+        totalMarks += maxMarks;
+
+        subjects.push({
+          subject,
+          marks,
+          totalMarks: maxMarks,
+          teacherRemarks,
+        });
+      }
+
+      const percentage = (obtainedMarks / totalMarks) * 100;
+
+      const marksheet = new MarkSheet({
+        studentId: student._id,
+        examType,
+        subjects,
+        totalMarks,
+        obtainedMarks,
+        percentage: percentage.toFixed(2),
+        overallRemarks: "No overall remarks"
+      });
+
+      await marksheet.save();
+      results.push({ roll, message: "Marksheet saved successfully" });
+    }
+
+    res.status(200).json({ message: "Excel data processed", results });
+  } catch (error) {
+    console.error("Error processing file:", error);
+    res.status(500).json({ error: "Error processing file.", details: error.message });
+  }
+};
+import { Student } from '../model.js';
+
+/**
+ * Finds a student by roll number given a teacher's assigned class and division.
+ * @param {Number} roll - The student's roll number.
+ * @param {Object} teacher - The teacher object containing classTeacher details.
+ * @returns {Promise<Object|null>} - The found student document or null if not found.
+ */
+export const findStudentByRoll = async (roll, teacher) => {
+  if (!teacher.classTeacher) {
+    throw new Error("Teacher does not have assigned classTeacher details.");
+  }
+  
+  const student = await Student.findOne({
+    roll: roll,
+    class: teacher.classTeacher.class,
+    division: teacher.classTeacher.division
+  });
+  return student;
+};
+
 export { 
     login, 
     assignMarksheet, 
